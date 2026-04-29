@@ -1,174 +1,162 @@
-# Building a Research Assistant with Groq and Llama
+# Research Assistant
 
-This project walks through building a clean, modular AI research assistant using the Groq API and the Llama 3.3 model. By the end, you will have a working tool that takes any topic as input and returns a concise, controlled summary.
+An agentic research assistant that uses a Groq-hosted LLM and real-time web search to answer questions about current events and time-sensitive topics.
 
 ---
 
-## Project Structure
+## Architecture
 
 ```
-ResearchAssistant/
-├── groq_call.py       # Groq client setup and API wrapper
-├── TopicResearch.py   # TopicSearcher — pure search utility
-├── orchestrator.py    # Orchestrator — controls behavior and prompt
-└── main.py            # Entry point
+User Input
+    │
+    ▼
+┌─────────────────────────────────────────────────────┐
+│                    Orchestrator                     │
+│  (the only bridge between LLM world and tool world) │
+│                                                     │
+│   messages[] ──► call_llm() ──► Groq API (HTTP)     │
+│       ▲                              │              │
+│       │            finish_reason?    │              │
+│       │           "tool_calls" ◄─────┘              │
+│       │                │                            │
+│       │           _execute()                        │
+│       │                │                            │
+│       └── tool result  ▼                            │
+│                   Tools.web_search()                │
+│                   (Tavily API, HTTP)                 │
+└─────────────────────────────────────────────────────┘
+    │
+    ▼  finish_reason = "stop"
+  Final Answer
 ```
 
-Each file has a single responsibility. This is intentional — and one of the core lessons of this project.
+**The LLM and your code live in separate worlds — HTTP only, no direct access.**
+
+| Layer | File | Purpose |
+|---|---|---|
+| Client | [groq_client.py](groq_client.py) | Initializes the Groq SDK client from `GROQ_API_KEY` |
+| Config | [config.py](config.py) | `LLM_MODEL`, `SYSTEM_PROMPT`, `TOOL_DEFINITIONS` |
+| LLM caller | [llm.py](llm.py) | Wraps `client.chat.completions.create()` |
+| Tools | [tools.py](tools.py) | Runnable tool implementations (Python code) |
+| Orchestrator | [orchestrator.py](orchestrator.py) | Agentic loop — routes between LLM and tools |
 
 ---
 
-## The Code
+## Tool Definitions vs. tools.py
 
-### 1. `groq_call.py` — API Foundation
+These are two separate things that serve two different audiences:
 
-```python
-def get_groq_client():
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError("GROQ_API_KEY not found in environment variables.")
-    return Groq(api_key=api_key)
+| | `TOOL_DEFINITIONS` in [config.py](config.py) | [tools.py](tools.py) |
+|---|---|---|
+| **Read by** | The LLM | Your Python code |
+| **Purpose** | Tells the model *when* and *how* to call a tool | Actually executes the tool |
+| **Format** | JSON schema | Python class methods |
 
-def make_groq_call(client, messages, model=None, max_tokens=None):
-    if model is None:
-        model = LLM_MODEL
-    kwargs = {"model": model, "messages": messages}
-    if max_tokens is not None:
-        kwargs["max_tokens"] = max_tokens
-    return client.chat.completions.create(**kwargs)
+`TOOL_DEFINITIONS` has two critical fields:
+
+- **`description`** — controls *when* the model picks a tool. A bad description leads to wrong tool selection or hallucinated arguments. The current `web_search` description explicitly states what NOT to use it for (history, definitions, stable facts) — this is intentional.
+- **`parameters`** — controls *what arguments* the model generates. The schema must match exactly what `tools.py` expects.
+
+---
+
+## The Agentic Loop
+
+`Orchestrator.run()` in [orchestrator.py](orchestrator.py) drives a `while True` loop with two exit conditions:
+
+```
+while True:
+    response = call_llm(...)
+
+    if finish_reason == "tool_calls":
+        # 1. Append the assistant message FIRST (order matters)
+        # 2. Execute each tool call
+        # 3. Append each tool result linked by tool_call_id
+        # → loop again
+
+    else:  # finish_reason == "stop"
+        return response content
 ```
 
-> **Key lesson: `max_tokens` is the only hard enforcement for response length.**
-> The API accepts an optional `max_tokens` argument. When set, the model physically cannot generate more tokens than the limit — regardless of what the prompt says. This is different from the system prompt, which is just a suggestion.
+Three invariants to respect:
+
+1. **`finish_reason = "tool_calls"`** → model wants a tool, keep looping. **`finish_reason = "stop"`** → model is done, return the answer.
+2. **`tool_call_id`** is the linking pin between a request and its result. Every tool result message must carry the `tool_call_id` from the corresponding tool call.
+3. **The assistant message must be appended before the tool result** — the message list order is part of the protocol. Appending out of order causes an API error.
+
+`arguments` arrives as a **JSON string**, not a dict. Always `json.loads()` it before passing to tool functions (see [orchestrator.py:14](orchestrator.py#L14)).
 
 ---
 
-### 2. `TopicResearch.py` — Pure Search Utility
+## tool_choice
 
-```python
-class TopicSearcher:
-    def __init__(self, client, model=None):
-        self.client = client
-        self.model = model
+[llm.py](llm.py) sets `tool_choice="auto"`.
 
-    def search_topic(self, topic, system_prompt=None):
-        if not topic:
-            raise ValueError("Topic cannot be empty.")
+| Value | Behavior |
+|---|---|
+| `"auto"` | Model decides whether to call a tool — but biases *toward* tool use, it is not neutral |
+| `"none"` | Disables tools entirely; model must answer from training data |
+| `{"type": "function", "function": {"name": "..."}}` | Forces a specific tool call |
 
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": f"Research and summarize the following topic: {topic}"})
-
-        return make_groq_call(self.client, messages, self.model)
-```
-
-> **Key lesson: Keep utility classes free of hardcoded behavior.**
-> `TopicSearcher` does not decide *how* the model should respond — it only handles *what* to send. The system prompt is accepted as a parameter, not hardcoded inside. This makes the class reusable across different contexts with different tones or constraints.
+There is no built-in "smart" mode. The model's judgment about when to search comes entirely from the `description` field in `TOOL_DEFINITIONS` and the `SYSTEM_PROMPT`.
 
 ---
 
-### 3. `orchestrator.py` — The Brain
+## Parallel vs. Sequential Tool Calls
 
-```python
-SYSTEM_PROMPT = "You must respond in exactly 2 short sentences. No more, no less. Do not add any extra explanation or details."
+`parallel_tool_calls=False` is set in [llm.py](llm.py), so this agent runs tools **sequentially** — one tool per loop iteration, each result informing the next decision.
 
-class Orchestrator:
-    def __init__(self):
-        self.client = get_groq_client()
-        self.searcher = TopicSearcher(self.client)
-
-    def run(self, topic):
-        response = self.searcher.search_topic(topic, system_prompt=SYSTEM_PROMPT)
-        return response.choices[0].message.content
-```
-
-> **Key lesson: The orchestrator owns the behavior, not the utility.**
-> The system prompt lives here — in the class that decides *how* the assistant should behave. If you want to change the tone, response style, or constraints, you change it in one place. The `TopicSearcher` below it stays untouched.
+| Mode | When to use |
+|---|---|
+| Sequential (`parallel_tool_calls=False`) | Each tool result may change what the next query should be |
+| Parallel | Multiple independent lookups where results don't depend on each other |
 
 ---
 
-### 4. `main.py` — Entry Point
+## Prompt Tuning by Model
 
-```python
-def main():
-    try:
-        orchestrator = Orchestrator()
-        topic = input("Enter a question or topic to search: ").strip()
-        if not topic:
-            raise ValueError("No topic entered.")
-        result = orchestrator.run(topic)
-        print("Response from Groq:")
-        print(result)
-    except Exception as e:
-        print(f"An error occurred: {e}")
+The current model is `llama-3.1-8b-instant` (a smaller open model). **The same prompt does not work across all models** — always re-tune when switching.
 
-if __name__ == "__main__":
-    main()
-```
+| Model type | Prompt style |
+|---|---|
+| Smaller models (Llama 3) | Verbose, explicit, use CAPS for emphasis, add negative examples, reframe as positives |
+| Frontier models (GPT-4) | Concise, intent-based, trust the model's judgment |
+| Claude | Intent-based, XML tags, reasons before acting, naturally conservative with tools |
 
-> **Key lesson: `main` should only wire things together.**
-> No business logic, no API calls, no prompt construction — just user input, orchestrator call, and output. Keeping `main` thin means you can swap the orchestrator or add a UI later without rewriting anything.
+If you switch from `llama-3.1-8b-instant` to a frontier model, revisit `SYSTEM_PROMPT` and the `description` fields in `TOOL_DEFINITIONS` — what works for Llama will be over-specified for Claude or GPT-4.
 
 ---
 
-## Key Lessons
+## Setup
 
-### How the Chat API roles work
+**Requirements:** Python 3.10+
 
-Every message sent to the API has a `role`:
-
-| Role | Purpose |
-|------|---------|
-| `system` | Sets the model's behavior and tone before the conversation starts |
-| `user` | The actual question or input from the human |
-| `assistant` | The model's previous replies (used for multi-turn conversations) |
-
-The model reads them in order — `system` first to understand its role, then `user` to know what to respond to.
-
----
-
-### System prompt vs `max_tokens`
-
-> **System prompts influence behavior. `max_tokens` enforces it.**
-
-| Control | Type | Reliability |
-|---------|------|-------------|
-| `"Respond in 2 lines"` in system prompt | Suggestion | Low — model may ignore it |
-| `"You must respond in exactly 2 sentences..."` | Stronger suggestion | Medium — better wording helps |
-| `max_tokens=80` | Hard API cap | High — model cannot exceed it |
-
-When you need strict output length, always combine a clear system prompt with `max_tokens`.
-
----
-
-### Separation of concerns
-
-The project evolved through a deliberate refactoring:
-
-1. Started with everything in one file (`groq_call.py`)
-2. Moved `TopicSearcher` to its own file (`TopicResearch.py`)
-3. Added an `Orchestrator` to wire components together
-4. Moved the system prompt out of `TopicSearcher` into `Orchestrator`
-5. Kept `main.py` as a thin entry point
-
-Each step made the code easier to change without breaking other parts.
-
----
-
-## Running the Project
-
-Install dependencies:
 ```bash
-pip install groq python-dotenv
+pip install groq tavily-python python-dotenv
 ```
 
 Create a `.env` file:
+
 ```
-GROQ_API_KEY=your_api_key_here
+GROQ_API_KEY=your_groq_key
+TAVILY_API_KEY=your_tavily_key
 ```
 
-Run:
-```bash
-python main.py
+**Run:**
+
+```python
+from orchestrator import Orchestrator
+
+agent = Orchestrator()
+answer = agent.run("What is the current price of Bitcoin?")
+print(answer)
 ```
+
+---
+
+## Adding a New Tool
+
+1. Add a method to `Tools` in [tools.py](tools.py) below the marked line.
+2. Add a new entry to `TOOL_DEFINITIONS` in [config.py](config.py) — include both when TO use it and when NOT TO use it in the description.
+3. Add a dispatch branch in `Orchestrator._execute()` in [orchestrator.py](orchestrator.py#L13).
+
+The orchestrator handles the rest automatically.
