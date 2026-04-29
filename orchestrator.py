@@ -11,21 +11,39 @@ class Orchestrator:
         self.tools = Tools()
 
     def _execute(self, name: str, arguments: str) -> str:
-        args = json.loads(arguments)
-        if name == "web_search":
-            return self.tools.web_search(args["query"])
-        raise ValueError(f"Unknown tool: {name}")
+        try:
+            args = json.loads(arguments)
+        except json.JSONDecodeError as exc:
+            return f"Error: could not parse tool arguments — {exc}"
+
+        dispatch = {
+            "web_search": lambda: self.tools.web_search(args["query"]),
+            "fetch_url": lambda: self.tools.fetch_url(args["url"]),
+            "save_finding": lambda: self.tools.save_finding(args["key"], args["value"]),
+        }
+
+        handler = dispatch.get(name)
+        if handler is None:
+            return f"Error: unknown tool '{name}'."
+        try:
+            return handler()
+        except KeyError as exc:
+            return f"Error: missing required argument {exc} for tool '{name}'."
+        except Exception as exc:  # noqa: BLE001
+            return f"Error executing tool '{name}': {exc}"
 
     def run(self, topic: str) -> str:
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": topic}
         ]
-
+           
         while True:
+          
             response = call_llm(self.client, messages)
             choice = response.choices[0]
-
+            
+            print(choice)
             if choice.finish_reason == "tool_calls":
                 assistant_message = choice.message
                 messages.append({
