@@ -3,11 +3,11 @@ from groq.types.chat import ChatCompletion
 from config import LLM_MODEL, TOOL_DEFINITIONS
 
 
-def call_llm(client: Groq, messages: list) -> ChatCompletion:
+def call_llm(client: Groq, messages: list, tool_choice: str = "auto") -> ChatCompletion:
     return client.chat.completions.create(
         model=LLM_MODEL,
         messages=messages,
         tools=TOOL_DEFINITIONS,
-        tool_choice="auto",
+        tool_choice=tool_choice,
         parallel_tool_calls=False
     )

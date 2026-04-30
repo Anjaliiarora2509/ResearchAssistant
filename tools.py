@@ -6,7 +6,7 @@ from tavily import TavilyClient
 
 load_dotenv()
 
-_FETCH_TIMEOUT_SECONDS = 10
+_FETCH_TIMEOUT_SECONDS = 100
 _FETCH_MAX_CHARS = 8000
 
 
@@ -59,7 +59,7 @@ class Tools:
             text = text[:_FETCH_MAX_CHARS] + f"\n\n[truncated — {len(text)} chars total]"
         return text or "Page fetched successfully but contained no readable text."
 
-    def save_finding(self, key: str, value: str) -> str:
+    def save_finding(self, key: str, value) -> str:
         """REMEMBER: store a distilled insight under a short label.
 
         Overwrites any previous finding stored under the same key.
@@ -68,5 +68,10 @@ class Tools:
         key = key.strip()
         if not key:
             return "Error: key must be a non-empty string."
+        # Coerce lists/dicts the LLM occasionally passes instead of a plain string
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value)
+        elif not isinstance(value, str):
+            value = str(value)
         self._findings[key] = value
         return f"Finding saved under '{key}'."

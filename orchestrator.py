@@ -38,7 +38,7 @@ class Orchestrator:
             {"role": "user", "content": topic}
         ]
            
-        while True:
+        for _ in range(5):
           
             response = call_llm(self.client, messages)
             choice = response.choices[0]
@@ -70,3 +70,18 @@ class Orchestrator:
                     })
             else:
                 return choice.message.content
+        # Loop exhausted — ask the LLM to summarize whatever it has gathered so far
+        messages.append({
+            "role": "user",
+            "content": (
+                "You have reached the maximum number of research steps. "
+                "Summarize everything you have found so far into a final answer. "
+                "Do not call any more tools."
+            )
+        })
+        summary_response = call_llm(self.client, messages, tool_choice="none")
+        summary = summary_response.choices[0].message.content
+        return (
+            "Agent quit after 5 loops. Below is the result:\n\n"
+            + summary
+        )

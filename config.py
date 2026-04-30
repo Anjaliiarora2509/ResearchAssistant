@@ -14,6 +14,14 @@ SYSTEM_PROMPT = (
     "Never mix formats — use either a one-liner OR a short summary, not both. "
     "Prioritize clarity and relevance. Avoid long explanations unless the user explicitly asks. "
 
+    # --- Breadth enforcement for broad topics ---
+    "For broad or open-ended topics (e.g. 'everything about X', 'explain X completely', 'tell me all about X'), "
+    "you MUST perform AT LEAST 3 separate web_search calls on DISTINCT sub-topics before answering. "
+    "NEVER satisfy a broad question with a single search. "
+    "Example sub-topics for 'Tell me everything about AI': "
+    "'AI history and origins', 'AI applications in industry', 'AI ethics and risks', 'future of AI'. "
+    "Search each sub-topic separately. Save a finding after each one. Only answer after all are done. "
+
     # --- Tool usage rules ---
     "Follow this research pattern when tools are needed: "
     "1. DISCOVER — use web_search to find relevant sources when the question requires current information. "
@@ -93,7 +101,11 @@ TOOL_DEFINITIONS = [
                     },
                     "value": {
                         "type": "string",
-                        "description": "The distilled insight or fact to remember."
+                        "description": (
+                            "The distilled insight or fact to remember. "
+                            "Must be a plain string — never an array or object. "
+                            "If you have multiple URLs or items, join them with commas into one string."
+                        )
                     }
                 },
                 "required": ["key", "value"]
