@@ -1,10 +1,9 @@
 """
 Tool definitions and handlers for the ResearchAssistant agent.
 
-Each tool bundles its LLM-facing JSON schema with its Python handler via the
-ToolEntry dataclass.  The Tools class owns all stateful resources (API clients,
-working-memory store) and exposes a registry that the Orchestrator uses for
-both schema advertising and dispatch.
+Each retrieval concern is its own class (SRP).  ToolRegistry composes them
+and exposes the registry that Orchestrator uses for schema advertising and
+dispatch.
 """
 
 from __future__ import annotations
@@ -12,9 +11,11 @@ from __future__ import annotations
 import logging
 import os
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
+from functools import wraps
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,53 @@ load_dotenv()
 _FETCH_TIMEOUT_SECONDS: int = 100
 _FETCH_MAX_CHARS: int = 2_000
 _WEB_SEARCH_DEFAULT_MAX_RESULTS: int = 2
+_MIN_CONTENT_CHARS: int = 500
+_BLOCKED_DOMAINS: frozenset[str] = frozenset({
+    "tech.yahoo.com", "news.google.com", "twitter.com",
+    "linkedin.com", "facebook.com", "reddit.com",
+})
+
+# ---------------------------------------------------------------------------
+# Retry decorator
+# ---------------------------------------------------------------------------
+
+_RETRYABLE_HTTP_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+
+
+def retry(max_attempts: int = 3, base_delay: float = 1.0) -> Callable:
+    """Exponential backoff retry decorator.
+
+    Retries on any exception whose HTTP status code (if present) is in
+    _RETRYABLE_HTTP_CODES, or on non-HTTP exceptions (timeouts, DNS errors).
+    Raises the final exception if all attempts are exhausted.
+    """
+    def decorator(fn: Callable) -> Callable:
+        @wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            for attempt in range(max_attempts):
+                try:
+                    return fn(*args, **kwargs)
+                except urllib.error.HTTPError as exc:
+                    if exc.code not in _RETRYABLE_HTTP_CODES or attempt == max_attempts - 1:
+                        raise
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        "retry: attempt=%d/%d HTTP %d — retrying in %.1fs",
+                        attempt + 1, max_attempts, exc.code, delay,
+                    )
+                    time.sleep(delay)
+                except Exception:
+                    if attempt == max_attempts - 1:
+                        raise
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        "retry: attempt=%d/%d — retrying in %.1fs",
+                        attempt + 1, max_attempts, delay,
+                    )
+                    time.sleep(delay)
+        return wrapper
+    return decorator
+
 
 # ---------------------------------------------------------------------------
 # LLM tool schemas
@@ -127,69 +175,48 @@ _SAVE_FINDING_SCHEMA: dict[str, Any] = {
 
 @dataclass
 class ToolEntry:
-    """Bundles an LLM-facing JSON schema with its Python handler.
-
-    Attributes:
-        schema:  The OpenAI-compatible function schema advertised to the LLM.
-        handler: The callable invoked when the LLM requests this tool.
-    """
+    """Bundles an LLM-facing JSON schema with its Python handler."""
 
     schema: dict[str, Any]
     handler: Callable[..., str]
 
     @property
     def name(self) -> str:
-        """Return the tool name as declared in the schema."""
         return self.schema["function"]["name"]
 
 
 # ---------------------------------------------------------------------------
-# Tools — owns resources and registers all tool handlers
+# WebSearchRetriever — owns Tavily client and web_search logic
 # ---------------------------------------------------------------------------
 
 
-class Tools:
-    """Stateful container for all agent tools.
-
-    Initializes external API clients, maintains working memory, and exposes a
-    registry that maps tool names to ToolEntry objects.
+class WebSearchRetriever:
+    """Wraps the Tavily API and exposes a single web_search method.
 
     Raises:
-        ValueError: If a required environment variable (e.g. TAVILY_API_KEY)
-                    is missing.
+        ValueError: If TAVILY_API_KEY is not set in the environment.
     """
 
     def __init__(self) -> None:
-        self._tavily = self._init_tavily_client()
-        self._findings: dict[str, str] = {}
-        self.registry: dict[str, ToolEntry] = self._build_registry()
-
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
-
-    @property
-    def definitions(self) -> list[dict[str, Any]]:
-        """Return all tool schemas in a list suitable for passing to the LLM."""
-        return [entry.schema for entry in self.registry.values()]
-
-    # ------------------------------------------------------------------
-    # Tool handlers
-    # ------------------------------------------------------------------
+        api_key = os.getenv("TAVILY_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "TAVILY_API_KEY is not set. "
+                "Add it to your .env file before starting the assistant."
+            )
+        self._tavily = TavilyClient(api_key=api_key)
 
     def web_search(self, query: str, max_results: int = _WEB_SEARCH_DEFAULT_MAX_RESULTS) -> str:
-        """Search the web and return a formatted summary of results.
-
-        Args:
-            query:       The search query string.
-            max_results: Maximum number of results to return (default 5).
-
-        Returns:
-            A newline-separated string of Title / URL / Summary blocks, or
-            a plain message when no results are found.
-        """
-        response = self._tavily.search(query=query, max_results=max_results)
+        try:
+            response = self._search_raw(query, max_results)
+        except Exception as exc:
+            logger.error("web_search: all retries exhausted — %s", exc)
+            return f"Error: web search failed after retries — {exc}"
         results: list[dict[str, Any]] = response.get("results", [])
+        results = [
+            r for r in results
+            if urllib.parse.urlparse(r["url"]).netloc.removeprefix("www.") not in _BLOCKED_DOMAINS
+        ]
         if not results:
             return "No results found."
         return "\n\n".join(
@@ -197,40 +224,49 @@ class Tools:
             for r in results
         )
 
+    @retry(max_attempts=3, base_delay=1.0)
+    def _search_raw(self, query: str, max_results: int) -> dict[str, Any]:
+        return self._tavily.search(query=query, max_results=max_results)
+
+
+# ---------------------------------------------------------------------------
+# UrlFetcher — owns HTTP retrieval logic
+# ---------------------------------------------------------------------------
+
+
+class UrlFetcher:
+    """Fetches and validates the text content of a URL."""
+
     def fetch_url(self, url: str) -> str:
-        """Retrieve and return the text content of a URL.
+        domain = urllib.parse.urlparse(url).netloc.removeprefix("www.")
+        if domain in _BLOCKED_DOMAINS:
+            logger.info("fetch_url: blocked domain=%s", domain)
+            return f"Skipped: '{domain}' is a listing/aggregator page. Choose a direct article URL."
 
-        Truncates the response to _FETCH_MAX_CHARS to stay within LLM context
-        limits.  Returns a descriptive error string instead of raising so the
-        LLM can react gracefully.  URL format is pre-validated by FetchUrlInput.
-
-        Args:
-            url: The fully-qualified URL to fetch (http/https, pre-validated).
-
-        Returns:
-            The decoded page text (possibly truncated), or an error string.
-        """
-        print(f"[fetch_url] Fetching {url} ...", flush=True)
-        logger.info("fetch_url: requesting %s", url)
-        t0 = time.perf_counter()
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "ResearchAssistant/1.0"})
-            with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT_SECONDS) as resp:
-                charset: str = resp.headers.get_content_charset("utf-8")
-                text: str = resp.read().decode(charset, errors="replace")
+            text = self._fetch_raw(url)
         except urllib.error.HTTPError as exc:
-            print(f"[fetch_url] ERROR HTTP {exc.code} {exc.reason}", flush=True)
             logger.warning("fetch_url: HTTP %d %s — %s", exc.code, exc.reason, url)
             return f"Error fetching URL (HTTP {exc.code}): {exc.reason}"
         except urllib.error.URLError as exc:
-            print(f"[fetch_url] ERROR {exc.reason}", flush=True)
             logger.warning("fetch_url: URL error %s — %s", exc.reason, url)
             return f"Error fetching URL: {exc.reason}"
         except Exception as exc:  # noqa: BLE001
-            print(f"[fetch_url] ERROR {exc}", flush=True)
             logger.warning("fetch_url: unexpected error %s — %s", exc, url)
             return f"Unexpected error fetching URL: {exc}"
 
+        if len(text) < _MIN_CONTENT_CHARS:
+            logger.warning("fetch_url: thin content len=%d url=%s", len(text), url)
+            return f"Page returned too little content ({len(text)} chars) — likely a login wall or error page."
+
+        return text
+
+    def _fetch_raw(self, url: str) -> str:
+        """Decode, truncate, and return page text. Raises on network errors (for retry)."""
+        print(f"[fetch_url] Fetching {url} ...", flush=True)
+        logger.info("fetch_url: requesting %s", url)
+        t0 = time.perf_counter()
+        text = self._http_get(url)
         elapsed_ms = (time.perf_counter() - t0) * 1000
         text = text.strip()
         truncated = len(text) > _FETCH_MAX_CHARS
@@ -243,46 +279,65 @@ class Tools:
         )
         return text or "Page fetched successfully but contained no readable text."
 
+    @retry(max_attempts=2, base_delay=0.5)
+    def _http_get(self, url: str) -> str:
+        """Perform the HTTP GET and return decoded text. Raises on any network error."""
+        req = urllib.request.Request(url, headers={"User-Agent": "ResearchAssistant/1.0"})
+        with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT_SECONDS) as resp:
+            charset: str = resp.headers.get_content_charset("utf-8")
+            return resp.read().decode(charset, errors="replace")
+
+
+# ---------------------------------------------------------------------------
+# FindingStore — owns working memory
+# ---------------------------------------------------------------------------
+
+
+class FindingStore:
+    """Stores distilled insights in an in-memory key/value dict."""
+
+    def __init__(self) -> None:
+        self._findings: dict[str, str] = {}
+
     def save_finding(self, key: str, value: str) -> str:
-        """Store a distilled insight in working memory under a short label.
-
-        Overwrites any previous finding stored under the same key.  Input is
-        pre-validated and normalised by SaveFindingInput before this is called.
-
-        Args:
-            key:   A short, non-empty label identifying the finding.
-            value: The distilled insight to store (plain string, pre-validated).
-
-        Returns:
-            A confirmation string.
-        """
         self._findings[key] = value
         return f"Finding saved under '{key}'."
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
 
-    @staticmethod
-    def _init_tavily_client() -> TavilyClient:
-        """Initialise and return a TavilyClient using the env-configured API key.
+# ---------------------------------------------------------------------------
+# ToolRegistry — composes the three retrievers and exposes the registry
+# ---------------------------------------------------------------------------
 
-        Raises:
-            ValueError: If TAVILY_API_KEY is not set in the environment.
-        """
-        api_key = os.getenv("TAVILY_API_KEY")
-        if not api_key:
-            raise ValueError(
-                "TAVILY_API_KEY is not set. "
-                "Add it to your .env file before starting the assistant."
-            )
-        return TavilyClient(api_key=api_key)
+
+class ToolRegistry:
+    """Builds and owns the tool registry consumed by ToolDispatcher.
+
+    Composes WebSearchRetriever, UrlFetcher, and FindingStore; owns no
+    business logic of its own.
+    """
+
+    def __init__(self) -> None:
+        self._searcher = WebSearchRetriever()
+        self._fetcher = UrlFetcher()
+        self._store = FindingStore()
+        self.registry: dict[str, ToolEntry] = self._build_registry()
+
+    @property
+    def definitions(self) -> list[dict[str, Any]]:
+        """Return all tool schemas suitable for passing to the LLM."""
+        return [entry.schema for entry in self.registry.values()]
 
     def _build_registry(self) -> dict[str, ToolEntry]:
-        """Construct and return the tool registry."""
         entries = [
-            ToolEntry(schema=_WEB_SEARCH_SCHEMA,   handler=self.web_search),
-            ToolEntry(schema=_FETCH_URL_SCHEMA,     handler=self.fetch_url),
-            ToolEntry(schema=_SAVE_FINDING_SCHEMA,  handler=self.save_finding),
+            ToolEntry(schema=_WEB_SEARCH_SCHEMA,  handler=self._searcher.web_search),
+            ToolEntry(schema=_FETCH_URL_SCHEMA,    handler=self._fetcher.fetch_url),
+            ToolEntry(schema=_SAVE_FINDING_SCHEMA, handler=self._store.save_finding),
         ]
         return {entry.name: entry for entry in entries}
+
+
+# ---------------------------------------------------------------------------
+# Tools — backward-compatible alias so existing callers need no changes
+# ---------------------------------------------------------------------------
+
+Tools = ToolRegistry

@@ -1,7 +1,7 @@
 """Pydantic input schemas for all agent tools.
 
 Each schema validates and normalises the arguments the LLM passes before they
-reach the tool handler.  Validation happens in Orchestrator._execute(), which
+reach the tool handler.  Validation happens in ToolDispatcher.execute(), which
 catches ValidationError and returns a plain error string so the LLM can
 self-correct without crashing.
 """
