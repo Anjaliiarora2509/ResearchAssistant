@@ -2,11 +2,11 @@
 
 import logging
 import uuid
-from groq_client import get_groq_client
-from tools import ToolRegistry
-from planner import Planner
-from tool_dispatcher import ToolDispatcher
-from research_loop import ResearchLoop
+from .groq_client import get_groq_client
+from .tools import ToolRegistry
+from .planner import Planner
+from .tool_dispatcher import ToolDispatcher
+from .research_loop import ResearchLoop
 
 logging.basicConfig(
     level=logging.INFO,

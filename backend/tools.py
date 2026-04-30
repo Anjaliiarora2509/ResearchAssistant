@@ -263,7 +263,6 @@ class UrlFetcher:
 
     def _fetch_raw(self, url: str) -> str:
         """Decode, truncate, and return page text. Raises on network errors (for retry)."""
-        print(f"[fetch_url] Fetching {url} ...", flush=True)
         logger.info("fetch_url: requesting %s", url)
         t0 = time.perf_counter()
         text = self._http_get(url)
@@ -272,7 +271,6 @@ class UrlFetcher:
         truncated = len(text) > _FETCH_MAX_CHARS
         if truncated:
             text = text[:_FETCH_MAX_CHARS] + f"\n\n[truncated — {len(text)} chars total]"
-        print(f"[fetch_url] Done — {len(text)} chars in {elapsed_ms:.0f}ms", flush=True)
         logger.info(
             "fetch_url: done fetch_ms=%.0f raw_chars=%d truncated=%s",
             elapsed_ms, len(text), truncated,
@@ -300,6 +298,7 @@ class FindingStore:
         self._findings: dict[str, str] = {}
 
     def save_finding(self, key: str, value: str) -> str:
+        logger.info("save_finding: key=%s value_len=%d", key, len(value))
         self._findings[key] = value
         return f"Finding saved under '{key}'."
 

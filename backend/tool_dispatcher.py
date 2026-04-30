@@ -4,8 +4,8 @@ import json
 import logging
 import time
 from pydantic import ValidationError
-from tools import Tools
-from schemas import WebSearchInput, FetchUrlInput, SaveFindingInput
+from .tools import Tools
+from .schemas import WebSearchInput, FetchUrlInput, SaveFindingInput
 
 logger = logging.getLogger(__name__)
 

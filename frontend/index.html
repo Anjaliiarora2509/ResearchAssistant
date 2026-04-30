@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Research Assistant</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 16px;
+    }
+
+    h1 {
+      font-size: 1.8rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+      color: #f8fafc;
+    }
+
+    p.subtitle {
+      color: #94a3b8;
+      margin-bottom: 32px;
+      font-size: 0.95rem;
+    }
+
+    .card {
+      background: #1e2330;
+      border: 1px solid #2d3448;
+      border-radius: 12px;
+      padding: 28px;
+      width: 100%;
+      max-width: 720px;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 10px;
+    }
+
+    input[type="text"] {
+      flex: 1;
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1px solid #3b4260;
+      background: #0f1117;
+      color: #e2e8f0;
+      font-size: 1rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    input[type="text"]:focus { border-color: #6366f1; }
+
+    button {
+      padding: 10px 22px;
+      border-radius: 8px;
+      border: none;
+      background: #6366f1;
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+
+    button:hover:not(:disabled) { background: #4f46e5; }
+    button:disabled { background: #3b4260; cursor: not-allowed; }
+
+    .status {
+      margin-top: 18px;
+      font-size: 0.85rem;
+      color: #94a3b8;
+      min-height: 20px;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid #6366f1;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .result-box {
+      margin-top: 24px;
+      display: none;
+    }
+
+    .result-box h2 {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #6366f1;
+      margin-bottom: 10px;
+    }
+
+    .result-content {
+      background: #0f1117;
+      border: 1px solid #2d3448;
+      border-radius: 8px;
+      padding: 16px;
+      white-space: pre-wrap;
+      line-height: 1.7;
+      font-size: 0.95rem;
+      color: #cbd5e1;
+    }
+
+    .error { color: #f87171; }
+  </style>
+</head>
+<body>
+  <h1>Research Assistant</h1>
+  <p class="subtitle">Powered by Groq · Tavily · Llama 3</p>
+
+  <div class="card">
+    <div class="input-row">
+      <input
+        id="topicInput"
+        type="text"
+        placeholder="Enter a question or topic…"
+        autocomplete="off"
+      />
+      <button id="searchBtn" onclick="runResearch()">Search</button>
+    </div>
+
+    <div class="status" id="status"></div>
+
+    <div class="result-box" id="resultBox">
+      <h2>Result</h2>
+      <div class="result-content" id="resultContent"></div>
+    </div>
+  </div>
+
+  <script>
+    const API_URL = "http://localhost:8000/research";
+
+    const input   = document.getElementById("topicInput");
+    const btn     = document.getElementById("searchBtn");
+    const status  = document.getElementById("status");
+    const box     = document.getElementById("resultBox");
+    const content = document.getElementById("resultContent");
+
+    input.addEventListener("keydown", e => { if (e.key === "Enter") runResearch(); });
+
+    async function runResearch() {
+      const topic = input.value.trim();
+      if (!topic) { setStatus("Please enter a topic.", true); return; }
+
+      setLoading(true);
+      setStatus('<span class="spinner"></span> Researching…');
+      box.style.display = "none";
+      content.textContent = "";
+
+      try {
+        const res = await fetch(API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ topic }),
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(err.detail ?? "Unknown error");
+        }
+
+        const data = await res.json();
+        content.textContent = data.result;
+        box.style.display = "block";
+        setStatus("");
+      } catch (err) {
+        setStatus(err.message, true);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    function setLoading(on) {
+      btn.disabled = on;
+      input.disabled = on;
+    }
+
+    function setStatus(msg, isError = false) {
+      status.innerHTML = msg;
+      status.className = "status" + (isError ? " error" : "");
+    }
+  </script>
+</body>
+</html>

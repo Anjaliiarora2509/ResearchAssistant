@@ -1,7 +1,7 @@
 from groq import Groq
 from groq.types.chat import ChatCompletion
-from config import LLM_MODEL
-from tools import ToolRegistry
+from .config import LLM_MODEL
+from .tools import ToolRegistry
 
 _TOOL_DEFINITIONS = ToolRegistry().definitions
 
@@ -17,5 +17,5 @@ def call_llm(
         messages=messages,
         tools=_TOOL_DEFINITIONS,
         tool_choice=tool_choice,
-        parallel_tool_calls=False
+        parallel_tool_calls=True
     )

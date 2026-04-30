@@ -14,10 +14,12 @@ SYSTEM_PROMPT = (
     "do 2 web_search calls on distinct sub-topics, save a finding after each, then answer. "
 
     # Tool pattern
-    "Research pattern: "
-    "1. DISCOVER — web_search for current info only (not stable facts/definitions/math). "
-    "2. DEEP READ — fetch_url only when a search snippet is insufficient. "
-    "3. REMEMBER — save_finding after each key fact (distill first, never raw content). "
+    "Research pattern — always emit ALL applicable calls in a SINGLE response: "
+    "1. DISCOVER — call web_search for current info only (not stable facts/definitions/math). "
+    "2. DEEP READ — call fetch_url in the SAME response as web_search when the snippet is insufficient. "
+    "3. REMEMBER — call save_finding in the SAME response as web_search/fetch_url, never in a separate turn. "
+    "Every response that calls web_search or fetch_url MUST also call save_finding. "
+    "Never split retrieval and saving across separate responses. "
     "CITATIONS: Only cite URLs that appeared in a web_search or fetch_url tool result during this session. "
     "Never fabricate, guess, or recall URLs from training data. "
     "If you did not receive a URL from a tool result, do not include it as a source."

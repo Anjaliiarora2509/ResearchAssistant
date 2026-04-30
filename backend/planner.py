@@ -3,8 +3,8 @@
 import json
 import logging
 from groq import Groq
-from llm import call_llm
-from config import PLAN_LLM_MODEL
+from .llm import call_llm
+from .config import PLAN_LLM_MODEL
 
 logger = logging.getLogger(__name__)
 
